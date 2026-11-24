@@ -1,0 +1,60 @@
+# 阿里云 ECS 现网部署（单机：应用 + 宿主机 PostgreSQL）
+#
+# 与项目自带的 docker-compose.yml 的区别：
+#   - 数据库用外部已存在的 jarvis_default 网络里的 postgres，省内存
+#   - 不占 80/443：应用只监听宿主机 127.0.0.1:3100，由 site-proxy.service 按 Host 反代
+#   - 上传目录用具名 volume 持久化
+#
+# 用法（在 /root/fang-site 下）：
+#   docker compose -f docker-compose.ecs.yml up -d --build
+#   docker compose -f docker-compose.ecs.yml exec app npx prisma db push
+#   docker compose -f docker-compose.ecs.yml exec app node --experimental-strip-types prisma/seed.ts
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-https://fang.example.com}
+        NEXT_PUBLIC_SITE_NAME: ${NEXT_PUBLIC_SITE_NAME:-安居二手房}
+        NEXT_PUBLIC_CITY: ${NEXT_PUBLIC_CITY:-北京}
+    image: fang-site:latest
+    container_name: fang-app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # 变量由 start-app.sh 导出：数据库密码不落盘，从 jarvis-hub 的 env 现读
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL 必须由 start-app.sh 提供}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET 必须由 start-app.sh 提供}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-https://fang.example.com}
+      NEXT_PUBLIC_SITE_NAME: ${NEXT_PUBLIC_SITE_NAME:-安居二手房}
+      NEXT_PUBLIC_CITY: ${NEXT_PUBLIC_CITY:-北京}
+      REF_COOKIE_DAYS: ${REF_COOKIE_DAYS:-90}
+      TZ: Asia/Shanghai
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - uploads:/app/public/uploads
+    ports:
+      - '127.0.0.1:3100:3000'
+    networks:
+      - jarvis
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:3000/api/health']
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  uploads:
+
+networks:
+  jarvis:
+    external: true
+    name: jarvis_default

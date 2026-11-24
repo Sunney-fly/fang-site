@@ -1,0 +1,444 @@
+// 二手房网站数据模型
+// 数据库：PostgreSQL 16
+
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== 枚举 ====================
+
+/// 管理员分级：超管 > 管理员 > 子管理员；USER 为普通注册用户
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  AGENT
+  USER
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// 房源状态。子管理员只能提交到 PENDING，ADMIN/SUPER_ADMIN 审核
+enum ListingStatus {
+  DRAFT
+  PENDING
+  PUBLISHED
+  OFFLINE
+  REJECTED
+  SOLD
+}
+
+enum DealType {
+  SALE
+  RENT
+}
+
+/// 线索来源：留资表单 / 预约看房 / 电话点击 / 微信点击 / 后台代录
+enum LeadSource {
+  FORM
+  APPOINTMENT
+  PHONE_CLICK
+  WECHAT_CLICK
+  MANUAL
+}
+
+/// 线索跟进状态
+enum LeadStatus {
+  NEW
+  CONTACTED
+  FOLLOWING
+  VIEWED
+  DEAL
+  INVALID
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  DONE
+  CANCELED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+  PUBLISH
+  OFFLINE
+  MARK_SOLD
+  LOGIN
+  CREATE_USER
+  UPDATE_USER
+  DISABLE_USER
+  RESET_PASSWORD
+  SETTING_UPDATE
+}
+
+// ==================== 用户与管理员分级 ====================
+
+model User {
+  id           String     @id @default(cuid())
+  phone        String     @unique
+  passwordHash String
+  name         String
+  role         Role       @default(USER)
+  status       UserStatus @default(ACTIVE)
+  email        String?    @unique
+  avatar       String?
+
+  /// 归属上级：AGENT 挂 ADMIN，ADMIN 挂 SUPER_ADMIN，用于分级管理
+  parentId String?
+  parent   User?   @relation("UserHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children User[]  @relation("UserHierarchy")
+
+  /// 该用户创建的推广渠道码
+  sourceCodes SourceCode[]
+
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  agentProfile  AgentProfile?
+  listings      Listing[]
+  leadsOwned    Lead[]         @relation("LeadOwner")
+  appointments  Appointment[]  @relation("AppointmentOwner")
+  auditLogs     AuditLog[]
+  sessions      VisitSession[] @relation("SessionUser")
+  registeredVia String?
+
+  @@index([role, status])
+  @@index([parentId])
+}
+
+/// 子管理员（业务员）扩展资料：推广码是客户归属追踪的核心
+model AgentProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// 专属推广码，如 a8k3f2。访问 /?ref=a8k3f2 即打上该子管理员归属
+  refCode String @unique
+  /// 对外展示的称呼，如"王经理"
+  title   String?
+  /// 负责区域，如"朝阳区、通州区"
+  area    String?
+  /// 联系电话（前台展示，用于电话点击归因）
+  contactPhone String?
+  /// 微信号 / 企业微信活码图
+  wechatQr     String?
+  remark       String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ==================== 房源 ====================
+
+model Listing {
+  id       String        @id @default(cuid())
+  /// 对外房源编号，如 FY20250001
+  code     String        @unique
+  title    String
+  dealType DealType      @default(SALE)
+  status   ListingStatus @default(DRAFT)
+
+  /// 归属子管理员（"上下房源"的操作人）。为空表示平台自营房源
+  agentId String?
+  agent   User?   @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  // 价格：出售用总价（万元），出租用月租（元）
+  priceWan  Decimal? @db.Decimal(10, 2)
+  rentYuan  Decimal? @db.Decimal(10, 2)
+  unitPrice Decimal? @db.Decimal(10, 2) // 单价 元/㎡
+
+  // 小区与位置
+  community String
+  district  String?
+  businessArea String?
+  address   String?
+  longitude Float?
+  latitude  Float?
+
+  // 户型与面积
+  area        Decimal? @db.Decimal(10, 2)
+  layout      String? // 3室2厅1卫
+  rooms       Int?
+  halls       Int?
+  bathrooms   Int?
+  floor       Int?
+  totalFloors Int?
+  orientation String? // 南北通透
+  decoration  String? // 精装修
+  buildingType String? // 板楼/塔楼
+  hasElevator  Boolean?
+  buildYear    Int?
+  ownership    String? // 满五唯一
+
+  description String? @db.Text
+  highlights  String? @db.Text // 卖点，换行分隔
+
+  // 业主联系方式（仅管理员/归属子管理员可见）
+  ownerName  String?
+  ownerPhone String?
+
+  // 统计（冗余计数，避免每次 count）
+  viewCount Int @default(0)
+  leadCount Int @default(0)
+
+  isFeatured Boolean @default(false)
+  isTop      Boolean @default(false)
+
+  publishedAt DateTime?
+  soldAt      DateTime?
+  /// 审核意见
+  rejectReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  images       ListingImage[]
+  leads        Lead[]
+  appointments Appointment[]
+  bookmarks    Bookmark[]
+  pageViews    PageView[]
+
+  @@index([status, dealType, publishedAt])
+  @@index([agentId, status])
+  @@index([district, priceWan])
+  @@index([isTop, isFeatured])
+}
+
+model ListingImage {
+  id        String  @id @default(cuid())
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  url       String
+  sort      Int     @default(0)
+  isCover   Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([listingId, sort])
+}
+
+// ==================== 客户归属与访问追踪 ====================
+
+/// 匿名访客会话。客户第一次带 ?ref= 进来时，把归属写进这张表和 Cookie
+model VisitSession {
+  id String @id @default(cuid())
+  /// 浏览器指纹：Cookie 里存的随机 sid
+  sid String @unique
+
+  /// 归属子管理员（User.id）。Cookie 未过期则沿用首次归属
+  refUserId String?
+  refUser   User?   @relation("SessionUser", fields: [refUserId], references: [id], onDelete: SetNull)
+  /// 首次落地时的推广码原文，便于排查归属来源
+  refCode    String?
+  landedPath String?
+
+  utmSource   String?
+  utmMedium   String?
+  utmCampaign String?
+
+  /// 本次落地使用的渠道码（业务员码/海报码/落地页码）
+  sourceCodeId String?
+  sourceCode   SourceCode? @relation(fields: [sourceCodeId], references: [id], onDelete: SetNull)
+
+  device  String? // mobile / desktop
+  os      String?
+  browser String?
+  ip      String?
+  userAgent String? @db.Text
+
+  /// 会话内是否留下过联系方式
+  hasLead Boolean @default(false)
+
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  pageViews   Int      @default(0)
+
+  pageViewEntries PageView[]
+  leads           Lead[]
+
+  @@index([refUserId, firstSeenAt])
+  @@index([firstSeenAt])
+  @@index([sourceCodeId])
+}
+
+/// 推广渠道码：一个子管理员可以有多张名片/海报/落地页，各自独立统计
+model SourceCode {
+  id String @id @default(cuid())
+  /// 参数值，访问 /?sc=xxxx 或 /?ref=xxxx
+  code String @unique
+  name String
+  type SourceCodeType @default(AGENT_CARD)
+
+  /// 归属子管理员（业务员）
+  ownerId String?
+  owner   User?   @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  /// 渠道码落地时直达的房源（如"某套房的海报码"）
+  landingListingId String?
+
+  enabled   Boolean  @default(true)
+  remark    String?  @db.Text
+  createdBy String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions VisitSession[]
+  leads    Lead[]
+
+  @@index([ownerId, enabled])
+}
+
+enum SourceCodeType {
+  AGENT_CARD
+  POSTER
+  LANDING_PAGE
+  ARTICLE
+  ADS
+}
+
+model PageView {
+  id        String        @id @default(cuid())
+  sessionId String?
+  session   VisitSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  /// 归属子管理员，冗余便于直接聚合
+  refUserId String?
+  listingId String?
+  listing   Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  path     String
+  title    String?
+  referrer String?
+  /// 落地页带的 ref 参数
+  refParam String?
+
+  device String?
+  ip     String?
+  createdAt DateTime @default(now())
+
+  @@index([refUserId, createdAt])
+  @@index([listingId, createdAt])
+  @@index([createdAt])
+  @@index([path])
+  @@index([ip, refUserId, createdAt])
+}
+
+// ==================== 线索与互动 ====================
+
+/// 客户留资/咨询线索。归属到子管理员后进入其待跟进池
+model Lead {
+  id          String     @id @default(cuid())
+  name        String?
+  phone       String
+  wechat      String?
+  message     String?    @db.Text
+  source      LeadSource @default(FORM)
+  status      LeadStatus @default(NEW)
+
+  /// 归属子管理员（由 ref 归属决定，可被管理员改派）
+  ownerId String?
+  owner   User?   @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+
+  /// 归属访客会话，便于看客户看过哪些房
+  sessionId String?
+  session   VisitSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  /// 留资时命中的渠道码，用于统计"哪张海报带来了成交客户"
+  sourceCodeId String?
+  sourceCode   SourceCode? @relation(fields: [sourceCodeId], references: [id], onDelete: SetNull)
+
+  listingId String?
+  listing   Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  /// 客户在留资时点击的房源归属子管理员（可能与 owner 不同，用于对比）
+  listingAgentId String?
+
+  /// 跟进记录，换行分隔，格式 [时间] 内容
+  followUps String? @db.Text
+  followUpAt DateTime?
+  dealNote   String? @db.Text
+
+  ip        String?
+  userAgent String? @db.Text
+  /// 是否已同步到私域（加微信/进群）
+  privatized Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId, status, createdAt])
+  @@index([phone])
+  @@index([createdAt])
+  @@index([listingId])
+}
+
+model Appointment {
+  id     String            @id @default(cuid())
+  name   String
+  phone  String
+  wechat String?
+  /// 期望看房时间
+  expectAt DateTime?
+  remark   String?         @db.Text
+  status   AppointmentStatus @default(PENDING)
+
+  ownerId   String?
+  owner     User?    @relation("AppointmentOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  sessionId String?
+  listingId String?
+  listing   Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId, status, createdAt])
+  @@index([expectAt])
+}
+
+model Bookmark {
+  id        String   @id @default(cuid())
+  userId    String
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, listingId])
+  @@index([userId])
+}
+
+model AuditLog {
+  id      String      @id @default(cuid())
+  actorId String?
+  actor   User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action  AuditAction
+  target  String? // 目标类型:Listing / User / Setting
+  targetId String?
+  detail  String?     @db.Text
+  ip      String?
+  createdAt DateTime  @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([target, targetId])
+  @@index([createdAt])
+}
+
+/// 站点设置（单行 key-value）
+model Setting {
+  key       String   @id
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
+}
